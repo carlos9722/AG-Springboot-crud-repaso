@@ -4,7 +4,6 @@ import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 
-import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
 import org.springframework.validation.BindingResult;
@@ -49,6 +48,7 @@ import jakarta.validation.Valid;
  *
  * GET  /users
  * POST /users
+ * POST /users/register
  */
 @RequestMapping("/users")
 public class UserController {
@@ -56,23 +56,18 @@ public class UserController {
     /**
      * Dependencia del servicio de usuarios.
      *
-     * El Controller no debería encargarse directamente de acceder
-     * a la base de datos.
+     * El Controller no debería acceder directamente a la base de datos.
+     * Delega esa responsabilidad al servicio.
      *
-     * En su lugar:
-     *
-     * Controller → Service → Repository
-     *
-     * final significa que la referencia al servicio se asigna una vez
-     * mediante el constructor y no se cambia posteriormente.
+     * final significa que la referencia se asigna una vez
+     * mediante el constructor y no puede reasignarse después.
      */
     private final UserService service;
 
     /**
-     * Constructor del controlador.
+     * Constructor con inyección de dependencias.
      *
-     * Spring utiliza inyección de dependencias para proporcionar
-     * automáticamente una implementación de UserService.
+     * Spring proporciona automáticamente una implementación de UserService.
      *
      * @param service servicio que contiene la lógica relacionada
      *                con los usuarios.
@@ -84,14 +79,11 @@ public class UserController {
     /**
      * Obtiene todos los usuarios.
      *
-     * Endpoint:
+     * Endpoint: GET /users
      *
-     * GET /users
+     * Delega la consulta a UserService y devuelve la lista obtenida.
      *
-     * El Controller recibe la petición y delega la operación
-     * al UserService.
-     *
-     * @return lista de usuarios.
+     * @return lista de usuarios, que Spring normalmente serializa a JSON.
      */
     @GetMapping
     public List<User> list() {
@@ -99,25 +91,24 @@ public class UserController {
     }
 
     /**
-     * Crea un nuevo usuario.
+     * Crea un usuario utilizando la lógica general de creación.
      *
-     * Endpoint:
+     * Endpoint: POST /users
      *
-     * POST /users
+     * @RequestBody convierte el JSON del cuerpo de la petición
+     * en un objeto User.
      *
-     * @RequestBody convierte el JSON recibido en el cuerpo de la
-     * petición HTTP en un objeto User.
+     * @Valid activa las validaciones declaradas en User, como
+     * @NotBlank y @Size.
      *
-     * @Valid indica a Spring que debe ejecutar las validaciones
-     * definidas sobre User.
-     *
-     * BindingResult recibe los errores producidos por @Valid.
+     * BindingResult recoge los errores de validación para poder
+     * responder de forma controlada cuando hay campos inválidos.
      *
      * @param user usuario construido a partir del JSON recibido.
      * @param result resultado de las validaciones.
      *
-     * @return HTTP 400 si existen errores de validación.
-     *         HTTP 201 si el usuario fue creado correctamente.
+     * @return HTTP 400 si existen errores de validación;
+     *         HTTP 201 si el usuario se guarda correctamente.
      */
     @PostMapping
     public ResponseEntity<?> create(
@@ -125,24 +116,22 @@ public class UserController {
             BindingResult result) {
 
         /*
-         * Comprobamos si existen errores producidos por @Valid.
-         *
-         * Si hay errores, no continuamos con el guardado y devolvemos
-         * una respuesta HTTP 400 (Bad Request).
+         * Si hay errores en los campos, devolvemos HTTP 400
+         * y no continuamos con el guardado.
          */
         if (result.hasFieldErrors()) {
             return validation(result);
         }
 
         /*
-         * Si no existen errores:
+         * Si la validación es correcta:
          *
-         * 1. Enviamos el User al servicio.
-         * 2. El servicio se encarga de guardarlo.
-         * 3. Devolvemos HTTP 201 (Created).
+         * 1. Delegamos el guardado a UserService.
+         * 2. Recibimos el usuario guardado.
+         * 3. Respondemos con HTTP 201 (Created).
          *
-         * body(...) contiene el usuario creado que se devolverá
-         * en la respuesta.
+         * ResponseEntity permite controlar tanto el estado HTTP
+         * como el contenido de la respuesta.
          */
         return ResponseEntity
                 .status(HttpStatus.CREATED)
@@ -150,51 +139,90 @@ public class UserController {
     }
 
     /**
+     * Registra un usuario mediante el endpoint público de registro.
+     *
+     * Endpoint: POST /users/register
+     *
+     * Antes de reutilizar create(), fuerza admin = false.
+     *
+     * Esto evita que el valor de admin enviado en el JSON sea
+     * utilizado para solicitar el rol administrativo durante
+     * este proceso de registro.
+     *
+     * @param user usuario construido a partir del JSON recibido.
+     * @param result resultado de las validaciones ejecutadas por @Valid.
+     *
+     * @return la misma respuesta que genera create():
+     *         HTTP 400 si hay errores o HTTP 201 si se crea el usuario.
+     */
+    @PostMapping("/register")
+    public ResponseEntity<?> register(
+            @Valid @RequestBody User user,
+            BindingResult result) {
+
+        /*
+         * Regla de seguridad para el registro público:
+         * el usuario nuevo no puede solicitar ser administrador
+         * enviando admin = true en el JSON.
+         *
+         * Este valor se fuerza antes de delegar en create().
+         */
+        user.setAdmin(false);
+
+        /*
+         * Reutilizamos el método create() para no duplicar
+         * la validación, el guardado y la construcción de la respuesta.
+         *
+         * Como result pertenece al mismo objeto User, los errores
+         * recogidos durante la validación se mantienen.
+         */
+        return create(user, result);
+    }
+
+    /**
      * Construye una respuesta con los errores de validación.
      *
-     * BindingResult contiene los errores producidos por @Valid.
+     * BindingResult contiene los errores generados por @Valid.
      *
-     * Se recorren los errores de cada campo y se construye un
-     * Map<String, String>.
+     * Se recorren los errores de campo y se construye un mapa
+     * donde la clave es el nombre del campo y el valor es el mensaje.
      *
-     * Ejemplo de respuesta:
+     * Ejemplo conceptual:
      *
      * {
-     *     "username": "El campo username es requerido",
-     *     "password": "El campo password es requerido"
+     *     "username": "El campo username no debe estar vacío",
+     *     "password": "El campo password no debe estar vacío"
      * }
      *
      * @param result resultado de las validaciones.
-     * @return HTTP 400 con un mapa de errores.
+     * @return respuesta HTTP 400 con un mapa de errores.
      */
     private ResponseEntity<?> validation(BindingResult result) {
 
         /*
-         * HashMap permite almacenar los errores utilizando:
+         * HashMap almacena pares clave-valor:
          *
-         * clave   → nombre del campo
-         * valor   → mensaje del error
+         * clave → nombre del campo.
+         * valor → mensaje de error.
          *
          * Ejemplo:
-         *
-         * "username" → "El campo username es requerido"
+         * "username" → "El campo username no debe estar vacío".
          */
         Map<String, String> errors = new HashMap<>();
 
         /*
-         * getFieldErrors() obtiene los errores relacionados
-         * específicamente con los campos del objeto User.
+         * getFieldErrors() obtiene los errores asociados
+         * específicamente a los campos del objeto User.
          *
          * forEach() recorre cada error encontrado.
          */
         result.getFieldErrors().forEach(err -> {
 
             /*
-             * err.getField()
-             * → obtiene el nombre del campo que tiene el error.
+             * err.getField() obtiene el nombre del campo.
              *
-             * err.getDefaultMessage()
-             * → obtiene el mensaje definido para esa validación.
+             * err.getDefaultMessage() obtiene el mensaje definido
+             * en la anotación de validación correspondiente.
              */
             errors.put(
                 err.getField(),
@@ -203,10 +231,9 @@ public class UserController {
         });
 
         /*
-         * badRequest() genera una respuesta HTTP 400.
+         * badRequest() establece HTTP 400 (Bad Request).
          *
-         * body(errors) coloca nuestro mapa de errores
-         * dentro del cuerpo de la respuesta.
+         * body(errors) coloca el mapa dentro del cuerpo de la respuesta.
          */
         return ResponseEntity.badRequest().body(errors);
     }
